@@ -1,4 +1,4 @@
-name: Snowflake Model Auto-Sync + Release (Notebook Execution)
+name: Snowflake Model Auto-Sync + Release (Execute Notebook)
 
 on:
   repository_dispatch:
@@ -14,7 +14,7 @@ permissions:
 jobs:
   sync-snowflake-model:
     runs-on: ubuntu-latest
-    name: Fetch, Commit & Release Model from Snowflake (Notebook Mode)
+    name: Fetch, Commit & Release Model from Snowflake (Execute Notebook)
 
     env:
       SNOWFLAKE_CONNECTIONS_DEFAULT_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
@@ -26,17 +26,14 @@ jobs:
       SNOWFLAKE_CONNECTIONS_DEFAULT_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
 
     steps:
-      # 1️⃣ Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 2️⃣ Install Snowflake CLI (modern v3) and jq
       - name: Install Snowflake CLI (v3) and jq
         shell: bash
         run: |
-          echo "🐍 Installing modern Snowflake CLI..."
           python3 -m pip install --upgrade pip
           pip install --user --upgrade "snowflake-cli>=3.10.0"
           sudo apt-get install -y jq
@@ -44,7 +41,6 @@ jobs:
           source $GITHUB_ENV
           snow --version
 
-      # 3️⃣ Configure Snowflake connection (Password Auth)
       - name: Configure Snowflake connection
         shell: bash
         run: |
@@ -63,7 +59,6 @@ jobs:
           chmod 600 ~/.snowflake/config.toml
           echo "✅ Config file created and secured."
 
-      # 4️⃣ Verify Snowflake connection
       - name: Verify Snowflake connection
         shell: bash
         run: |
@@ -71,27 +66,22 @@ jobs:
           snow connection list
           snow sql -q "SELECT CURRENT_USER(), CURRENT_ROLE(), CURRENT_DATABASE(), CURRENT_SCHEMA();" --format CSV
 
-      # 5️⃣ Execute Snowflake Notebooks directly
+      # 5️⃣ Execute Notebooks sequentially using EXECUTE NOTEBOOK
       - name: Execute Snowflake ML Notebooks
         shell: bash
         run: |
           echo "🚀 Executing ML Notebooks directly in Snowflake..."
 
-          # Helper function to run a notebook and check status
           run_notebook() {
             local notebook_name=$1
             echo "🧠 Running notebook: $notebook_name ..."
-            snow notebook run "${notebook_name}" --wait --output json > result.json || {
-              echo "❌ Failed to execute notebook: $notebook_name"
-              cat result.json
-              exit 1
-            }
-
-            # Display execution result summary
-            cat result.json | jq '.'
-            local status=$(jq -r '.[0].status' result.json)
-            if [[ "$status" != "SUCCESS" ]]; then
-              echo "❌ Notebook ${notebook_name} failed (status: $status)"
+            snow sql -q "
+              USE DATABASE ${SNOWFLAKE_CONNECTIONS_DEFAULT_DATABASE};
+              USE SCHEMA ${SNOWFLAKE_CONNECTIONS_DEFAULT_SCHEMA};
+              EXECUTE NOTEBOOK '${notebook_name}' WAREHOUSE = ${SNOWFLAKE_CONNECTIONS_DEFAULT_WAREHOUSE};
+            "
+            if [ $? -ne 0 ]; then
+              echo "❌ Notebook ${notebook_name} failed!"
               exit 1
             fi
             echo "✅ Notebook ${notebook_name} executed successfully!"
@@ -103,7 +93,6 @@ jobs:
           run_notebook "MODEL_TRAINING"
           run_notebook "MODEL_EVALUATION"
 
-      # 6️⃣ List ONNX models in stage
       - name: List ONNX models in Snowflake stage
         shell: bash
         run: |
@@ -114,7 +103,6 @@ jobs:
             LIST @${SNOWFLAKE_CONNECTIONS_DEFAULT_DATABASE}.${SNOWFLAKE_CONNECTIONS_DEFAULT_SCHEMA}.ML_MODELS_STAGE PATTERN='.*.onnx';
           " --format table
 
-      # 7️⃣ Download newest ONNX model and push to repo + release
       - name: Download latest ONNX file, commit, and release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -150,7 +138,6 @@ jobs:
           snow sql -q "GET @${SNOWFLAKE_CONNECTIONS_DEFAULT_DATABASE}.${SNOWFLAKE_CONNECTIONS_DEFAULT_SCHEMA}.ML_MODELS_STAGE/$clean_file file://staged_models/"
           echo "✅ Model downloaded to staged_models/$clean_file"
 
-          # Commit model to repo
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add staged_models/
@@ -159,16 +146,13 @@ jobs:
           git pull --rebase origin "${CURRENT_BRANCH}" || true
           git push origin "${CURRENT_BRANCH}"
 
-          # Create a release
           RELEASE_TAG="model-$(date +'%Y%m%d-%H%M%S')"
           LATEST_MODEL_FILE=$(basename "$clean_file")
-
           gh release create "$RELEASE_TAG" "staged_models/$LATEST_MODEL_FILE" \
             --title "Model Release ($RELEASE_TAG)" \
             --notes "Latest trained model automatically synced from Snowflake." \
             --latest
 
-      # 8️⃣ Summary
       - name: Summary
         run: |
           echo "✅ All notebooks executed and latest model released successfully!"
