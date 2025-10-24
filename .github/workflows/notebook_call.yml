@@ -1,4 +1,4 @@
-name: Snowflake Model Auto-Sync + Release (Execute Notebook)
+name: Snowflake Execute Notebooks
 
 on:
   repository_dispatch:
@@ -9,12 +9,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: write  # required to push commits and create releases
 
 jobs:
   sync-snowflake-model:
     runs-on: ubuntu-latest
-    name: Fetch, Commit & Release Model from Snowflake (Execute Notebook)
+    name: Fetch, Execute ML Notebooks & Release Model from Snowflake
 
     env:
       SNOWFLAKE_CONNECTIONS_DEFAULT_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
@@ -22,18 +22,21 @@ jobs:
       SNOWFLAKE_CONNECTIONS_DEFAULT_PASSWORD: ${{ secrets.SNOWFLAKE_PASSWORD }}
       SNOWFLAKE_CONNECTIONS_DEFAULT_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
       SNOWFLAKE_CONNECTIONS_DEFAULT_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
-      SNOWFLAKE_CONNECTIONS_DEFAULT_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
-      SNOWFLAKE_CONNECTIONS_DEFAULT_SCHEMA: ${{ secrets.SNOWFLAKE_SCHEMA }}
+      SNOWFLAKE_CONNECTIONS_DEFAULT_DATABASE: ${{ github.event.client_payload.database || secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_CONNECTIONS_DEFAULT_SCHEMA: ${{ github.event.client_payload.schema || secrets.SNOWFLAKE_SCHEMA }}
 
     steps:
+      # 1️⃣ Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # 2️⃣ Install Snowflake CLI (v3) and jq
       - name: Install Snowflake CLI (v3) and jq
         shell: bash
         run: |
+          echo "🐍 Installing modern Snowflake CLI..."
           python3 -m pip install --upgrade pip
           pip install --user --upgrade "snowflake-cli>=3.10.0"
           sudo apt-get install -y jq
@@ -41,6 +44,7 @@ jobs:
           source $GITHUB_ENV
           snow --version
 
+      # 3️⃣ Configure Snowflake connection (Password Auth)
       - name: Configure Snowflake connection
         shell: bash
         run: |
@@ -59,6 +63,7 @@ jobs:
           chmod 600 ~/.snowflake/config.toml
           echo "✅ Config file created and secured."
 
+      # 4️⃣ Verify Snowflake connection
       - name: Verify Snowflake connection
         shell: bash
         run: |
@@ -66,19 +71,20 @@ jobs:
           snow connection list
           snow sql -q "SELECT CURRENT_USER(), CURRENT_ROLE(), CURRENT_DATABASE(), CURRENT_SCHEMA();" --format CSV
 
-      # 5️⃣ Execute Notebooks sequentially using EXECUTE NOTEBOOK
+      # 5️⃣ Execute Snowflake ML Notebooks sequentially
       - name: Execute Snowflake ML Notebooks
         shell: bash
         run: |
-          echo "🚀 Executing ML Notebooks directly in Snowflake..."
+          echo "🚀 Executing ML Notebooks in Snowflake..."
 
           run_notebook() {
             local notebook_name=$1
-            echo "🧠 Running notebook: $notebook_name ..."
+            echo "🧠 Running notebook: ${notebook_name} ..."
             snow sql -q "
               USE DATABASE ${SNOWFLAKE_CONNECTIONS_DEFAULT_DATABASE};
               USE SCHEMA ${SNOWFLAKE_CONNECTIONS_DEFAULT_SCHEMA};
-              EXECUTE NOTEBOOK '${notebook_name}' WAREHOUSE = ${SNOWFLAKE_CONNECTIONS_DEFAULT_WAREHOUSE};
+              EXECUTE NOTEBOOK ${SNOWFLAKE_CONNECTIONS_DEFAULT_DATABASE}.${SNOWFLAKE_CONNECTIONS_DEFAULT_SCHEMA}.${notebook_name}()
+                WAREHOUSE = ${SNOWFLAKE_CONNECTIONS_DEFAULT_WAREHOUSE};
             "
             if [ $? -ne 0 ]; then
               echo "❌ Notebook ${notebook_name} failed!"
@@ -87,12 +93,13 @@ jobs:
             echo "✅ Notebook ${notebook_name} executed successfully!"
           }
 
-          # Run all four notebooks sequentially
+          # Run all notebooks sequentially
           run_notebook "DATA_INGESTION"
           run_notebook "FEATURE_ENGINEERING"
           run_notebook "MODEL_TRAINING"
           run_notebook "MODEL_EVALUATION"
 
+      # 6️⃣ List ONNX models in stage
       - name: List ONNX models in Snowflake stage
         shell: bash
         run: |
@@ -103,6 +110,7 @@ jobs:
             LIST @${SNOWFLAKE_CONNECTIONS_DEFAULT_DATABASE}.${SNOWFLAKE_CONNECTIONS_DEFAULT_SCHEMA}.ML_MODELS_STAGE PATTERN='.*.onnx';
           " --format table
 
+      # 7️⃣ Download latest ONNX file, commit, and release
       - name: Download latest ONNX file, commit, and release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -132,6 +140,7 @@ jobs:
             echo "$json_out" | head -n 40
             exit 1
           fi
+
           echo "✅ Latest file: $latest_file"
           clean_file=${latest_file#ml_models_stage/}
           echo "🧩 Downloading model..."
@@ -153,6 +162,7 @@ jobs:
             --notes "Latest trained model automatically synced from Snowflake." \
             --latest
 
+      # 8️⃣ Summary
       - name: Summary
         run: |
           echo "✅ All notebooks executed and latest model released successfully!"
