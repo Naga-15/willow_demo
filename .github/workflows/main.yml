@@ -1,4 +1,4 @@
-name: Snowflake Model Auto-Sync + Release
+name: task exec
 
 on:
   repository_dispatch:
